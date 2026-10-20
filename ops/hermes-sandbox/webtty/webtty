@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Control the sandbox web terminal (ttyd + Cloudflare quick tunnel).
+# Usage: webtty {status|url|creds|start|stop|restart|logs [n]}
+set -u
+
+WT="$HOME/.hermes/webtty"
+LOG="$HOME/.hermes/logs"
+STOP="$WT/.stop"
+SUP_PID="$WT/supervisor.pid"
+SUPERVISOR="$WT/supervisor.sh"
+
+supervisor_pid() {
+    [ -f "$SUP_PID" ] || return 1
+    local pid
+    pid="$(cat "$SUP_PID" 2>/dev/null)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+}
+
+pids_matching() {
+    ps -eo pid,args | awk -v pat="$1" '$0 ~ pat && $0 !~ /awk/ {print $1}'
+}
+
+local_http_ok() {
+    local port
+    port="$(sed -n 's/^port=//p' "$WT/credentials" 2>/dev/null)"
+    curl -s -o /dev/null -m 3 -u "$(cred_line)" "http://127.0.0.1:${port:-7681}/token"
+}
+
+cred_line() {
+    local user pass
+    user="$(sed -n 's/^username=//p' "$WT/credentials")"
+    pass="$(sed -n 's/^password=//p' "$WT/credentials")"
+    printf '%s:%s' "$user" "$pass"
+}
+
+case "${1:-status}" in
+    start)
+        if pid="$(supervisor_pid)"; then
+            echo "already running (supervisor pid $pid)"
+            exit 0
+        fi
+        rm -f "$STOP"
+        setsid nohup "$SUPERVISOR" >> "$LOG/webtty-supervisor.log" 2>&1 &
+        for _ in $(seq 1 30); do
+            [ -s "$WT/public-url.txt" ] && break
+            sleep 1
+        done
+        if pid="$(supervisor_pid)"; then
+            echo "started (supervisor pid $pid)"
+            "$0" url
+        else
+            echo "failed to start; see $LOG/webtty-supervisor.log" >&2
+            exit 1
+        fi
+        ;;
+    stop)
+        touch "$STOP"
+        for p in $(pids_matching 'bin/cloudflared tunnel'); do kill -TERM "$p" 2>/dev/null; done
+        for p in $(pids_matching 'webtty/bin/ttyd'); do kill -TERM "$p" 2>/dev/null; done
+        if pid="$(supervisor_pid)"; then kill -TERM "$pid" 2>/dev/null; fi
+        for _ in $(seq 1 20); do
+            supervisor_pid >/dev/null || break
+            sleep 0.5
+        done
+        for pattern in 'webtty/bin/ttyd' 'bin/cloudflared tunnel'; do
+            for p in $(pids_matching "$pattern"); do kill -KILL "$p" 2>/dev/null; done
+        done
+        rm -f "$SUP_PID" "$WT/public-url.txt"
+        echo "stopped"
+        ;;
+    restart)
+        "$0" stop >/dev/null
+        exec "$0" start
+        ;;
+    url)
+        if [ -s "$WT/public-url.txt" ]; then
+            cat "$WT/public-url.txt"
+        else
+            echo "no public url yet" >&2
+            exit 1
+        fi
+        ;;
+    creds)
+        printf 'username: %s\npassword: %s\n' \
+            "$(sed -n 's/^username=//p' "$WT/credentials")" \
+            "$(sed -n 's/^password=//p' "$WT/credentials")"
+        ;;
+    status)
+        if pid="$(supervisor_pid)"; then
+            echo "supervisor: running (pid $pid)"
+        else
+            echo "supervisor: stopped"
+        fi
+        if [ -n "$(pids_matching 'webtty/bin/ttyd')" ]; then
+            echo "ttyd:       running (pid $(pids_matching 'webtty/bin/ttyd' | tr '\n' ' '))"
+        else
+            echo "ttyd:       stopped"
+        fi
+        if [ -n "$(pids_matching 'bin/cloudflared tunnel')" ]; then
+            echo "tunnel:     running (pid $(pids_matching 'bin/cloudflared tunnel' | tr '\n' ' '))"
+        else
+            echo "tunnel:     stopped"
+        fi
+        echo "url:        $(cat "$WT/public-url.txt" 2>/dev/null || echo '-')"
+        ;;
+    logs)
+        tail -n "${2:-40}" "$LOG/webtty-supervisor.log"
+        ;;
+    *)
+        echo "usage: $(basename "$0") {status|url|creds|start|stop|restart|logs [n]}" >&2
+        exit 2
+        ;;
+esac
