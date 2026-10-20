@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Control the sandbox-resident Hermes gateway supervisor.
+# Usage: hermes-svc {start|stop|restart|status|logs}
+set -u
+
+SVC_DIR="$HOME/.hermes/svc"
+LOG_DIR="$HOME/.hermes/logs"
+STOP_FLAG="$SVC_DIR/.stop"
+SUP_PID="$SVC_DIR/supervisor.pid"
+SUPERVISOR="$SVC_DIR/hermes-gateway-supervisor.sh"
+HERMES="$HOME/.local/bin/hermes"
+
+supervisor_pid() {
+    [ -f "$SUP_PID" ] || return 1
+    local pid
+    pid="$(cat "$SUP_PID" 2>/dev/null)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+}
+
+# The launcher execs the pinned interpreter with an inline bootstrap script that
+# ends in "gateway run", so match the tail of that command line, not "$HERMES".
+gateway_pids() {
+    pgrep -f -- '^/home/node/\.hermes/tools/python-[^ ]+ .* gateway run$' 2>/dev/null
+}
+
+case "${1:-status}" in
+    start)
+        if pid="$(supervisor_pid)"; then
+            echo "already running (supervisor pid $pid)"
+            exit 0
+        fi
+        mkdir -p "$LOG_DIR"
+        rm -f "$STOP_FLAG"
+        setsid nohup "$SUPERVISOR" >/dev/null 2>&1 &
+        sleep 3
+        if pid="$(supervisor_pid)"; then
+            echo "started (supervisor pid $pid)"
+        else
+            echo "failed to start; see $LOG_DIR/supervisor.log" >&2
+            exit 1
+        fi
+        ;;
+    stop)
+        touch "$STOP_FLAG"
+        if pid="$(supervisor_pid)"; then kill -TERM "$pid" 2>/dev/null; fi
+        # The supervisor re-launches on child exit, so stop the wrapper first,
+        # then the gateway it still owns.
+        for _ in $(seq 1 20); do
+            supervisor_pid >/dev/null || break
+            sleep 0.5
+        done
+        for gp in $(gateway_pids); do kill -TERM "$gp" 2>/dev/null; done
+        for _ in $(seq 1 30); do
+            [ -z "$(gateway_pids)" ] && break
+            sleep 0.5
+        done
+        for gp in $(gateway_pids); do kill -KILL "$gp" 2>/dev/null; done
+        rm -f "$SUP_PID"
+        echo "stopped"
+        ;;
+    restart)
+        "$0" stop >/dev/null
+        exec "$0" start
+        ;;
+    status)
+        if pid="$(supervisor_pid)"; then
+            echo "supervisor: running (pid $pid)"
+        else
+            echo "supervisor: stopped"
+        fi
+        if pids="$(gateway_pids)"; then
+            echo "gateway:    running (pid $(echo "$pids" | tr '\n' ' '))"
+        else
+            echo "gateway:    stopped"
+        fi
+        [ -f "$LOG_DIR/gateway.log" ] && echo "log:        $LOG_DIR/gateway.log"
+        ;;
+    logs)
+        tail -n "${2:-50}" "$LOG_DIR/gateway.log"
+        ;;
+    *)
+        echo "usage: $(basename "$0") {start|stop|restart|status|logs [n]}" >&2
+        exit 2
+        ;;
+esac
