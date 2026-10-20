@@ -1,0 +1,20 @@
+# Hermes Agent command
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+
+# Hermes install/update in this sandbox: uv's rustls client does not trust the
+# egress proxy CA (no keyUsage), so scope the TLS opt-out to PyPI only.
+export UV_INSECURE_HOST="pypi.org files.pythonhosted.org"
+
+# Self-healing bootstrap: this sandbox has no init system, so every shell start
+# checks the two supervisors (Hermes gateway, web terminal) and relaunches any
+# that died. Detached + flock'd, so it costs ~1ms when everything is up.
+(
+    command -v flock >/dev/null 2>&1 && { exec 9>"$HOME/.hermes/.bootstrap.lock"; flock -n 9 || exit 0; }
+    pid_alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
+    if [ -x "$HOME/.local/bin/hermes-svc" ] && ! pid_alive "$HOME/.hermes/svc/supervisor.pid"; then
+        setsid nohup "$HOME/.local/bin/hermes-svc" start >/dev/null 2>&1 &
+    fi
+    if [ -x "$HOME/.local/bin/webtty" ] && ! pid_alive "$HOME/.hermes/webtty/supervisor.pid"; then
+        setsid nohup "$HOME/.local/bin/webtty" start >/dev/null 2>&1 &
+    fi
+) >/dev/null 2>&1

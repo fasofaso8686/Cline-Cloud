@@ -53,8 +53,20 @@ webtty logs 50
 
 `~/.local/bin/webtty` is a symlink to `~/.hermes/webtty/webtty`. The supervisor
 restarts either process a few seconds after it exits and rewrites
-`public-url.txt` whenever the tunnel is recreated; interactive shells restart it
-after a container reboot via `~/.bashrc`.
+`public-url.txt` whenever the tunnel is recreated.
+
+Self-healing, in three layers (the pod has no init system and restarts wipe
+every process):
+
+1. `~/.hermes/scripts/webtty-keeper.sh` runs as a Hermes cron job
+   (`hermes cron list` → `webtty-keeper`, every 3m, `--no-agent`, silent unless
+   it repairs something). It checks the supervisor, ttyd, cloudflared and the
+   public URL, then calls `webtty start`.
+2. `~/.bashrc` runs the same liveness check on every shell start (flock'd,
+   detached, ~1ms when healthy) and relaunches both supervisors — the gateway's
+   and the web terminal's.
+3. Each supervisor restarts its own child on exit.
+
 
 Notes:
 
